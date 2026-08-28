@@ -1,6 +1,11 @@
 export const SENSOR_DATA_LENGTH = 16
 export const DEVICE_STATUS_LENGTH = 8
+export const SYNC_TIME_LENGTH = 8
 export const TEMP_INVALID = -32768
+
+/** SYNC_TIME: Unix epoch seconds, little-endian uint64. */
+export function syncTimePacket(epochSeconds = Math.floor(Date.now() / 1000)) { const packet = new Uint8Array(SYNC_TIME_LENGTH); let value = BigInt(epochSeconds); for (let index = 0; index < SYNC_TIME_LENGTH; index += 1) { packet[index] = Number(value & 0xffn); value >>= 8n } return packet }
+export function decodeSyncTimeAck(data: DataView) { if (data.byteLength < SYNC_TIME_LENGTH) throw new Error(`SYNC_TIME ACK must be ${SYNC_TIME_LENGTH} bytes`); let epoch = 0n; for (let index = SYNC_TIME_LENGTH - 1; index >= 0; index -= 1) epoch = (epoch << 8n) | BigInt(data.getUint8(index)); return Number(epoch) }
 
 export const CONTROL_COMMANDS = [
   [0x01, 'Start measurement'], [0x02, 'Stop measurement'], [0x03, 'Request data'],
