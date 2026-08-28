@@ -3,8 +3,8 @@ import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Wearable Health',
-  description: 'A calm, connected dashboard for your BLE wearable.',
+  title: 'Wearable Health | Daily Activity',
+  description: 'Theo dõi sức khỏe, vận động và thiết bị BLE trong một dashboard trực quan.',
   generator: 'v0.app',
   icons: {
     icon: [
@@ -39,7 +39,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className="bg-background">
+    <html lang="vi" className="bg-background">
       <body className="antialiased">
         {children}
         {process.env.NODE_ENV === 'production' && <Analytics />}
