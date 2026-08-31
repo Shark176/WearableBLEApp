@@ -1,4 +1,4 @@
-import type { HistoricalRecord, PowerConfiguration, Sensor } from './protocol/wearableProtocol'
+import { PowerMode, PowerProfile, type HistoricalRecord, type PowerConfiguration, type Sensor } from './protocol/wearableProtocol'
 
 export type RecoverySession = {
   id: string
@@ -25,7 +25,7 @@ export type WearableRepositoryState = {
 
 const defaultState = (): WearableRepositoryState => ({
   records: [], recoverySessions: [], ecgSessions: [], lastSequence: 0,
-  powerConfiguration: { mode: 0, profile: 1, sensorAcquisitionRateHz: 10, processingRateHz: 5, bleReportingIntervalMs: 1000, st25dvLoggingIntervalMs: 5000 },
+  powerConfiguration: { mode: PowerMode.AUTO, profile: PowerProfile.NORMAL, sensorAcquisitionRateHz: 10, processingRateHz: 5, bleReportingIntervalMs: 1000, st25dvLoggingIntervalMs: 5000 },
 })
 
 /** Session-scoped repository. Persistence is intentionally injectable so firmware apps can provide durable storage. */
