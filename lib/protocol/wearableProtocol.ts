@@ -6,6 +6,10 @@
 export const SENSOR_DATA_LENGTH = 16
 export const DEVICE_STATUS_LENGTH = 8
 export const SYNC_TIME_LENGTH = 8
+export const ECG_DATA_LENGTH = 20
+export const NFC_EVENT_LENGTH = 20
+export const DEBUG_DATA_LENGTH = 20
+export const RECOVERY_DATA_LENGTH = 24
 export const TEMP_INVALID = -32768
 
 /** Service and characteristic UUIDs */
@@ -74,33 +78,60 @@ export interface HistoricalRecord {
   raw?: Uint8Array
 }
 
-/** ECG packet decoder (firmware format undefined; placeholder) */
+/** ECG packet decoder (20 bytes: seq + sample count + 9 int16 samples) */
 export interface ECGPacket {
   sequence: number
-  timestamp?: number
-  sampleRate?: number
+  sampleCount: number
   samples: number[]
   raw: Uint8Array
 }
 
-/** Debug command model (firmware undefined; placeholder) */
-export interface DebugParameter {
-  name: string
-  type: 'uint8' | 'uint16' | 'uint32' | 'int8' | 'int16' | 'int32'
-  value: number
+export function decodeECGData(data: DataView): ECGPacket {
+  if (data.byteLength !== 20) throw new Error('ECG Data must be 20 bytes')
+  const sequence = data.getUint8(0)
+  const sampleCount = Math.min(data.getUint8(1), 9) // max 9 samples per packet
+  const samples: number[] = []
+  for (let i = 0; i < sampleCount; i++) {
+    const offset = 2 + i * 2
+    samples.push(data.getInt16(offset, true)) // little-endian int16
+  }
+  return { sequence, sampleCount, samples, raw: readBytes(data) }
 }
 
+/** NFC Data (20 bytes: state, lastEvent, ftmStatus, configResult, recoveryStatus, + 15 reserved) */
+export interface NFCData {
+  state: number
+  lastEvent: number
+  ftmStatus: number
+  configResult: number
+  recoveryStatus: number
+  raw: Uint8Array
+}
+
+export function decodeNFCData(data: DataView): NFCData {
+  if (data.byteLength !== 20) throw new Error('NFC Data must be 20 bytes')
+  return {
+    state: data.getUint8(0),
+    lastEvent: data.getUint8(1),
+    ftmStatus: data.getUint8(2),
+    configResult: data.getUint8(3),
+    recoveryStatus: data.getUint8(4),
+    raw: readBytes(data),
+  }
+}
+
+/** Debug command/response (20 bytes: command + 19 params) */
 export interface DebugCommand {
-  id: number
-  name: string
-  parameters: DebugParameter[]
+  command: number
+  params: Uint8Array
+  raw: Uint8Array
 }
 
-export interface DebugResponse {
-  commandId: number
-  status: 'success' | 'error' | 'unsupported'
-  data?: Uint8Array
-  message?: string
+export function decodeDebugData(data: DataView): DebugCommand {
+  if (data.byteLength !== 20) throw new Error('Debug Data must be 20 bytes')
+  const command = data.getUint8(0)
+  const params = readBytes(data).slice(1)
+  return { command, params, raw: readBytes(data) }
 }
 
 /** Adaptive power configuration (TODO: actual firmware thresholds undefined) */
@@ -165,3 +196,25 @@ export function decodeStatus(data: DataView): DeviceStatus {
 
 export function commandPacket(command: number) { const bytes = new Uint8Array(8); bytes[0] = command; return bytes }
 export function parseHex(input: string) { const tokens = input.trim().split(/[\s,]+/).filter(Boolean); if (!tokens.length || tokens.some((token) => !/^[0-9a-fA-F]{2}$/.test(token))) throw new Error('HEX must contain space-separated byte pairs'); return new Uint8Array(tokens.map((token) => Number.parseInt(token, 16))) }
+
+/** Recovery Data (24 bytes: seq(2) + timestamp(4) + sensor(16) + crc(2)) */
+export interface RecoveryPacket {
+  sequence: number
+  timestamp: number
+  sensor: Sensor
+  crc: number
+  raw: Uint8Array
+}
+
+export function decodeRecoveryData(data: DataView): RecoveryPacket {
+  if (data.byteLength !== RECOVERY_DATA_LENGTH) throw new Error(`Recovery Data must be ${RECOVERY_DATA_LENGTH} bytes`)
+  const sequence = data.getUint16(0, true) // little-endian uint16
+  const timestamp = data.getUint32(2, true) // little-endian uint32
+  const crc = data.getUint16(22, true) // little-endian uint16
+
+  // Extract sensor payload (16 bytes from offset 6)
+  const sensorView = new DataView(data.buffer, data.byteOffset + 6, 16)
+  const sensor = decodeSensor(sensorView)
+
+  return { sequence, timestamp, sensor, crc, raw: readBytes(data) }
+}

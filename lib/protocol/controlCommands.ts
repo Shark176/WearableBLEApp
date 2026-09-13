@@ -2,7 +2,12 @@ export const SERVICE_UUID = '0000fe40-cc7a-482a-984a-7f2ed5b3e58f'
 export const CONTROL_UUID = '0000fe41-8e22-4541-9d4c-21edae82ed19'
 export const SENSOR_DATA_UUID = '0000fe42-8e22-4541-9d4c-21edae82ed19'
 export const DEVICE_STATUS_UUID = '0000fe43-8e22-4541-9d4c-21edae82ed19'
-export const CONTROL_COMMANDS = [{ byte: 0, label: 'Start measurement' }, { byte: 1, label: 'Stop measurement' }, { byte: 2, label: 'Request current data' }, { byte: 3, label: 'Normal power mode' }, { byte: 4, label: 'Low-power mode' }, { byte: 5, label: 'Start ECG' }, { byte: 6, label: 'Stop ECG' }] as const
+export const CONTROL_COMMANDS = [{ byte: 0x01, label: 'Start measurement' }, { byte: 0x02, label: 'Stop measurement' }, { byte: 0x03, label: 'Request current data' }, { byte: 0x04, label: 'Normal power mode' }, { byte: 0x05, label: 'Low-power mode' }, { byte: 0x06, label: 'Start ECG' }, { byte: 0x07, label: 'Stop ECG' }, { byte: 0x08, label: 'Emergency test' }] as const
+
+export const NFC_DATA_UUID = '0000fe44-8e22-4541-9d4c-21edae82ed19'
+export const ECG_DATA_UUID = '0000fe45-8e22-4541-9d4c-21edae82ed19'
+export const DEBUG_DATA_UUID = '0000fe46-8e22-4541-9d4c-21edae82ed19'
+export const RECOVERY_DATA_UUID = '0000fe47-8e22-4541-9d4c-21edae82ed19'
 export function createControlPacket(command: number) { const packet = new Uint8Array(8); packet[0] = command; return packet }
 export function bytesToHex(data: Uint8Array) { return Array.from(data, (byte) => byte.toString(16).padStart(2, '0').toUpperCase()).join(' ') }
 export type SensorReading = { hr: number; spo2: number; temperature: number; superCap: number; power: number; flags: number; x: number; y: number; z: number; reserved: number; raw: string }
