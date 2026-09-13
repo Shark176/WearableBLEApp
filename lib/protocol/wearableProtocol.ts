@@ -66,6 +66,7 @@ export enum SensorFlags {
   FALL_CANDIDATE = 0x08,
   EMERGENCY = 0x10,
   ECG_ACTIVE = 0x20,
+  WEAR_DETECTED = 0x40,
 }
 
 /** Historical record model — source-aware deduplication */
@@ -184,6 +185,9 @@ export interface DeviceStatus {
   resetCounter: number
   flags: number
   protocolVersion: number
+  emergency: boolean
+  ecgActive: boolean
+  wearDetected: boolean
 }
 
 export function decodeStatus(data: DataView): DeviceStatus {
@@ -191,7 +195,7 @@ export function decodeStatus(data: DataView): DeviceStatus {
   const flags = data.getUint8(7)
   const measurement = ['Idle', 'Measuring', 'ECG active', 'Low power', 'Emergency', 'Error'][data.getUint8(0)] || 'UNKNOWN'
   const errors: Record<number, string> = { 0: 'None', 1: 'Invalid command', 0x10: 'Temperature sensor not present', 0x11: 'Temperature timeout', 0x12: 'Temperature bus error' }
-  return { measurement, measurementRaw: data.getUint8(0), sensorReady: data.getUint8(1) !== 0, error: errors[data.getUint8(2)] || 'UNKNOWN', errorCode: data.getUint8(2), power: data.getUint8(3), supercap: data.getUint16(4, true), resetCounter: data.getUint8(6), flags: flags & 0xf0, protocolVersion: flags & 0x0f }
+  return { measurement, measurementRaw: data.getUint8(0), sensorReady: data.getUint8(1) !== 0, error: errors[data.getUint8(2)] || 'UNKNOWN', errorCode: data.getUint8(2), power: data.getUint8(3), supercap: data.getUint16(4, true), resetCounter: data.getUint8(6), flags, protocolVersion: flags & 0x0f, emergency: !!(flags & 0x10), ecgActive: !!(flags & 0x20), wearDetected: !!(flags & 0x40) }
 }
 
 export function commandPacket(command: number) { const bytes = new Uint8Array(8); bytes[0] = command; return bytes }
