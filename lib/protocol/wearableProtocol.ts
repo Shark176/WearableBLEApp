@@ -166,12 +166,14 @@ export interface Sensor {
   y: number
   z: number
   magnitude: number
+  /** Firmware qvar_raw, payload bytes 14-15, little-endian uint16. */
+  qvarRaw: number
 }
 
 export function decodeSensor(data: DataView): Sensor {
   if (data.byteLength !== SENSOR_DATA_LENGTH) throw new Error(`Sensor Data must be ${SENSOR_DATA_LENGTH} bytes`)
   const flags = data.getUint8(7)
-  return { heartRate: data.getUint8(0), spo2: data.getUint8(1), temperature: data.getInt16(2, true) === TEMP_INVALID ? null : data.getInt16(2, true) / 100, supercap: data.getUint16(4, true), power: data.getUint8(6), flags, emergency: !!(flags & SensorFlags.EMERGENCY), ecgActive: !!(flags & SensorFlags.ECG_ACTIVE), fallCandidate: !!(flags & SensorFlags.FALL_CANDIDATE), wear: 'UNKNOWN' as WearState, x: data.getInt16(8, true), y: data.getInt16(10, true), z: data.getInt16(12, true), magnitude: Math.sqrt(data.getInt16(8, true) ** 2 + data.getInt16(10, true) ** 2 + data.getInt16(12, true) ** 2) }
+  return { heartRate: data.getUint8(0), spo2: data.getUint8(1), temperature: data.getInt16(2, true) === TEMP_INVALID ? null : data.getInt16(2, true) / 100, supercap: data.getUint16(4, true), power: data.getUint8(6), flags, emergency: !!(flags & SensorFlags.EMERGENCY), ecgActive: !!(flags & SensorFlags.ECG_ACTIVE), fallCandidate: !!(flags & SensorFlags.FALL_CANDIDATE), wear: !!(flags & SensorFlags.WEAR_DETECTED) ? 'WORN' : 'NOT WORN', x: data.getInt16(8, true), y: data.getInt16(10, true), z: data.getInt16(12, true), magnitude: Math.sqrt(data.getInt16(8, true) ** 2 + data.getInt16(10, true) ** 2 + data.getInt16(12, true) ** 2), qvarRaw: data.getUint16(14, true) }
 }
 
 export interface DeviceStatus {
