@@ -37,15 +37,20 @@ export const CHARACTERISTIC_METADATA: Record<CharacteristicKey, { label: string;
   RECOVERY_DATA: { label: 'Recovery Data', direction: 'notify', required: false },
 }
 
-/** SYNC_TIME: Unix epoch seconds, little-endian uint64. */
-export function syncTimePacket(epochSeconds = Math.floor(Date.now() / 1000)) { const packet = new Uint8Array(SYNC_TIME_LENGTH); let value = BigInt(epochSeconds); for (let index = 0; index < SYNC_TIME_LENGTH; index += 1) { packet[index] = Number(value & 0xffn); value >>= 8n } return packet }
-export function decodeSyncTimeAck(data: DataView) { if (data.byteLength < SYNC_TIME_LENGTH) throw new Error(`SYNC_TIME ACK must be ${SYNC_TIME_LENGTH} bytes`); let epoch = 0n; for (let index = SYNC_TIME_LENGTH - 1; index >= 0; index -= 1) epoch = (epoch << 8n) | BigInt(data.getUint8(index)); return Number(epoch) }
+/** SYNC_TIME: command byte + Unix seconds + milliseconds, little-endian. */
+export function syncTimePacket(date = new Date()) { const ms = date.getTime(); const packet = new Uint8Array(SYNC_TIME_LENGTH); const view = new DataView(packet.buffer); packet[0] = 0x09; view.setUint32(1, Math.floor(ms / 1000), true); view.setUint16(5, ms % 1000, true); packet[7] = 0x00; return packet }
+export function decodeSyncTimeAck(data: DataView) { if (data.byteLength < SYNC_TIME_LENGTH) throw new Error(`SYNC_TIME ACK must be ${SYNC_TIME_LENGTH} bytes`); return data.getUint32(1, true) }
 
 export const CONTROL_COMMANDS = [
   [0x01, 'Start measurement'], [0x02, 'Stop measurement'], [0x03, 'Request data'],
   [0x04, 'Normal mode'], [0x05, 'Low-power mode'], [0x06, 'ECG start'],
-  [0x07, 'ECG stop'], [0x08, 'Emergency test'],
+  [0x07, 'ECG stop'], [0x08, 'Emergency test'], [0x09, 'Synchronize time'],
+  [0x0E, 'Clear history'],
 ] as const
+
+export const UNSUPPORTED_CHARACTERISTICS = [CHARACTERISTICS.NFC_EVENT, CHARACTERISTICS.DEBUG_DATA, CHARACTERISTICS.RECOVERY_DATA] as const
+
+export function buildTimeSyncPacket(date = new Date()) { return syncTimePacket(date) }
 
 export type WearState = 'WORN' | 'NOT WORN' | 'UNKNOWN'
 
@@ -166,14 +171,14 @@ export interface Sensor {
   y: number
   z: number
   magnitude: number
-  /** Firmware qvar_raw, payload bytes 14-15, little-endian uint16. */
+  /** Firmware qvar_raw, payload bytes 14-15, little-endian signed int16. */
   qvarRaw: number
 }
 
 export function decodeSensor(data: DataView): Sensor {
   if (data.byteLength !== SENSOR_DATA_LENGTH) throw new Error(`Sensor Data must be ${SENSOR_DATA_LENGTH} bytes`)
   const flags = data.getUint8(7)
-  return { heartRate: data.getUint8(0), spo2: data.getUint8(1), temperature: data.getInt16(2, true) === TEMP_INVALID ? null : data.getInt16(2, true) / 100, supercap: data.getUint16(4, true), power: data.getUint8(6), flags, emergency: !!(flags & SensorFlags.EMERGENCY), ecgActive: !!(flags & SensorFlags.ECG_ACTIVE), fallCandidate: !!(flags & SensorFlags.FALL_CANDIDATE), wear: !!(flags & SensorFlags.WEAR_DETECTED) ? 'WORN' : 'NOT WORN', x: data.getInt16(8, true), y: data.getInt16(10, true), z: data.getInt16(12, true), magnitude: Math.sqrt(data.getInt16(8, true) ** 2 + data.getInt16(10, true) ** 2 + data.getInt16(12, true) ** 2), qvarRaw: data.getUint16(14, true) }
+  return { heartRate: data.getUint8(0), spo2: data.getUint8(1), temperature: data.getInt16(2, true) === TEMP_INVALID ? null : data.getInt16(2, true) / 100, supercap: data.getUint16(4, true), power: data.getUint8(6), flags, emergency: !!(flags & SensorFlags.EMERGENCY), ecgActive: !!(flags & SensorFlags.ECG_ACTIVE), fallCandidate: !!(flags & SensorFlags.FALL_CANDIDATE), wear: !!(flags & SensorFlags.WEAR_DETECTED) ? 'WORN' : 'NOT WORN', x: data.getInt16(8, true), y: data.getInt16(10, true), z: data.getInt16(12, true), magnitude: Math.sqrt(data.getInt16(8, true) ** 2 + data.getInt16(10, true) ** 2 + data.getInt16(12, true) ** 2), qvarRaw: data.getInt16(14, true) }
 }
 
 export interface DeviceStatus {
