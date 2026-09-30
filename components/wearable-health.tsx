@@ -13,7 +13,7 @@ type View = 'home' | 'details' | 'ecg' | 'history' | 'device' | 'debug' | 'profi
 type Mode = 'demo' | 'real'
 type Sensor = ReturnType<typeof decodeSensor>
 type Log = { id: string; timestamp: string; characteristic: string; direction: 'RX' | 'TX'; hex: string; length: number; decoded?: string }
-const nav = [{ id: 'home', label: 'Dashboard', icon: Activity }, { id: 'details', label: 'Details', icon: Settings2 }, { id: 'ecg', label: 'ECG', icon: Activity }, { id: 'history', label: 'History', icon: History }, { id: 'device', label: 'Device', icon: Watch }, { id: 'profile', label: 'Profile', icon: UserRound }, { id: 'debug', label: 'Debug', icon: Laptop }] as const
+const nav = [{ id: 'home', label: 'Dashboard', icon: Activity }, { id: 'details', label: 'Details', icon: Settings2 }, { id: 'ecg', label: 'MAX86150', icon: Activity }, { id: 'history', label: 'History', icon: History }, { id: 'device', label: 'Device', icon: Watch }, { id: 'profile', label: 'Profile', icon: UserRound }, { id: 'debug', label: 'Debug', icon: Laptop }] as const
 const labels: Record<BleState, string> = { disconnected: 'Not connected', scanning: 'Scanning', connecting: 'Connecting', connected: 'Connected', reconnecting: 'Reconnecting', error: 'Connection error' }
 const emptyDiagnostics: BleDiagnostics = { secureContext: false, supported: false, available: null, permission: 'unknown', lastErrorName: '', errorMessage: '', failedOperation: '' }
 const clock = () => new Date().toLocaleTimeString([], { hour12: false })
