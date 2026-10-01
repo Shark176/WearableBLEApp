@@ -51,6 +51,13 @@ App ghi 8 byte vào `FE41`. Byte `0` là mã lệnh; byte `1–7` bằng `0` tr�
 
 Firmware trả lời bằng một notification `FE43` sau các lệnh `0x01`, `0x02`, `0x04`–`0x09` và sau một lệnh không hợp lệ. Các lệnh `0x03` và `0x0A`–`0x0E` không có phản hồi riêng. Các lệnh LoRa `0x0F`–`0x13` không đổi state và được trả lời bằng gói LoRa status `0x20` trên `FE46` (mục 7).
 
+Cách app gửi lệnh (`BleManager.sendCommand`):
+
+- Gói khác 8 byte bị từ chối ngay trong app, không ghi xuống thiết bị (kể cả ô raw HEX ở tab Debug).
+- Với các lệnh có phản hồi `FE43`, app chờ notification `FE43` kế tiếp tối đa 2 giây. Error code `0x01` thì báo lỗi cho người dùng (ví dụ `0x06` trả về `Measuring` + `0x01`: MAX86150 không vào được chế độ ECG). Không có `FE43` trong 2 giây thì báo là không rõ kết quả.
+- Đồng bộ thời gian sau khi kết nối cũng đi qua đường này, nên app biết thiết bị chấp nhận (`0x00`) hay từ chối (`0x01`).
+- Trước khi chủ động ngắt kết nối, app gửi `0x02`. Khi thiết bị tự ngắt (`gattserverdisconnected`), app xóa số liệu hiện tại và trạng thái ECG; kết nối lại thì chạy lại toàn bộ luồng.
+
 Mã lệnh lạ đưa thiết bị về state `Error` với error code `0x01` (gói rỗng thì bị bỏ qua, không đổi state). Ở state này firmware ngừng gửi Sensor Data cho đến khi nhận một lệnh đổi state như `0x01` hoặc `0x02`.
 
 ### Đồng bộ thời gian (`0x09`)
