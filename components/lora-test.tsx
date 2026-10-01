@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { Radio, RefreshCw, Send, Square, Wifi } from 'lucide-react'
-import { LORA_COMMANDS, LORA_EVENTS, LORA_MODEM_RC, LORA_RESULTS, LORA_STATE_NOT_BUILT, LORA_TX_DONE, LORA_TX_POWER_MAX_DBM, LORA_TX_POWER_MIN_DBM, type LoraStatus } from '@/lib/protocol/wearableProtocol'
+import { enumLabel, LORA_COMMANDS, LORA_EVENTS, LORA_MODEM_RC, LORA_RESULTS, LORA_STATE_NOT_BUILT, LORA_TX_DONE, LORA_TX_POWER_MAX_DBM, LORA_TX_POWER_MIN_DBM, type LoraStatus } from '@/lib/protocol/wearableProtocol'
 
 type Props = {
   status: LoraStatus | null
@@ -54,14 +54,14 @@ export default function LoraTest({ status, mode, connected, onCommand }: Props) 
     <section className="info-card">
       <div className="section-heading compact"><div><p className="eyebrow">STATUS · FE46 PACKET 0x20</p><h2>{status ? status.stateLabel : 'No status received'}</h2></div><span className={`status-dot ${status?.state === 3 ? 'online' : ''}`} /></div>
       {status ? <>
-        {row('Last answer', `${LORA_RESULTS[status.commandResult] ?? `0x${status.commandResult.toString(16)}`} · ${age}`)}
+        {row('Last answer', `${enumLabel(LORA_RESULTS, status.commandResult)} · ${age}`)}
         {row('Modem', INIT_STAGES[status.initStage] ?? String(status.initStage))}
-        {row('Last modem event', status.eventCount ? LORA_EVENTS[status.lastEvent] ?? `0x${status.lastEvent.toString(16)}` : 'None')}
-        {row('Last TX', LORA_TX_DONE[status.txDoneStatus] ?? String(status.txDoneStatus))}
+        {row('Last modem event', status.eventCount ? enumLabel(LORA_EVENTS, status.lastEvent) : 'None')}
+        {row('Last TX', enumLabel(LORA_TX_DONE, status.txDoneStatus))}
         {row('Uplinks requested', String(status.uplinkCount))}
         {row('Downlinks', String(status.downlinkCount))}
         {row('Modem events', String(status.eventCount))}
-        {row('Last modem rc', LORA_MODEM_RC[status.lastRc] ?? String(status.lastRc))}
+        {row('Last modem rc', enumLabel(LORA_MODEM_RC, status.lastRc))}
         {row('Radio faults (panic / BUSY timeout / SPI)', `${status.panicCount} / ${status.busyTimeouts} / ${status.spiErrors}`)}
       </> : <p className="empty-state">{mode === 'real' && connected ? 'Press Refresh status to read the LoRa state.' : 'Connect the wearable first.'}</p>}
     </section>

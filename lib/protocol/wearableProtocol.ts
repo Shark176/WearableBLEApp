@@ -12,6 +12,14 @@ export const DEBUG_DATA_LENGTH = 20
 export const RECOVERY_DATA_LENGTH = 24
 export const TEMP_INVALID = -32768
 
+/** Spec §2 / §14.12: an enum value the app does not know is shown as `Unknown (0x..)`, never guessed. */
+export const unknownEnum = (value: number) => `Unknown (0x${(value & 0xff).toString(16).padStart(2, '0').toUpperCase()})`
+export const enumLabel = (labels: Record<number, string>, value: number) => labels[value] ?? unknownEnum(value)
+/** Power state byte (FE42 byte 6, FE43 byte 3). Firmware v1 only sends 1 or 2. */
+export const POWER_STATES: Record<number, string> = { 1: 'Normal', 2: 'Low power' }
+export const MEASUREMENT_STATES: Record<number, string> = { 0: 'Idle', 1: 'Measuring', 2: 'ECG active', 3: 'Low power', 4: 'Emergency', 5: 'Error' }
+export const ERROR_CODES: Record<number, string> = { 0: 'None', 1: 'Invalid command', 0x10: 'Temperature sensor not present', 0x11: 'Temperature timeout', 0x12: 'Temperature bus error' }
+
 /** Service and characteristic UUIDs */
 export const SERVICE_UUID = '0000fe40-cc7a-482a-984a-7f2ed5b3e58f'
 export const CHARACTERISTICS = {
@@ -26,15 +34,15 @@ export const CHARACTERISTICS = {
 
 export type CharacteristicKey = keyof typeof CHARACTERISTICS
 
-/** Characteristic metadata for discovery */
-export const CHARACTERISTIC_METADATA: Record<CharacteristicKey, { label: string; direction: 'read' | 'write' | 'notify'; required: boolean }> = {
-  CONTROL: { label: 'Control', direction: 'write', required: true },
-  SENSOR_DATA: { label: 'Sensor Data', direction: 'notify', required: true },
-  DEVICE_STATUS: { label: 'Device Status', direction: 'notify', required: true },
-  NFC_EVENT: { label: 'NFC Event', direction: 'notify', required: false },
-  ECG_DATA: { label: 'ECG Data', direction: 'notify', required: false },
-  DEBUG_DATA: { label: 'Debug Data', direction: 'read', required: false },
-  RECOVERY_DATA: { label: 'Recovery Data', direction: 'notify', required: false },
+/** Characteristic metadata: GATT properties as in spec §4.2. */
+export const CHARACTERISTIC_METADATA: Record<CharacteristicKey, { label: string; properties: readonly ('read' | 'write' | 'notify')[]; required: boolean }> = {
+  CONTROL: { label: 'Control', properties: ['write'], required: true },
+  SENSOR_DATA: { label: 'Sensor Data', properties: ['read', 'notify'], required: true },
+  DEVICE_STATUS: { label: 'Device Status', properties: ['read', 'notify'], required: true },
+  NFC_EVENT: { label: 'NFC Event', properties: ['read', 'notify'], required: false },
+  ECG_DATA: { label: 'ECG Data', properties: ['read', 'notify'], required: false },
+  DEBUG_DATA: { label: 'Debug Data', properties: ['read', 'write', 'notify'], required: false },
+  RECOVERY_DATA: { label: 'Recovery Data', properties: ['read', 'notify'], required: false },
 }
 
 /** SYNC_TIME: command byte + Unix seconds + milliseconds, little-endian. The firmware has no ACK packet; it answers with a DEVICE_STATUS notification. */
@@ -84,7 +92,7 @@ export interface LoraStatus {
 export function decodeLoraStatus(data: DataView): LoraStatus {
   if (data.byteLength !== DEBUG_DATA_LENGTH || data.getUint8(0) !== LORA_STATUS_CODE) throw new Error('LoRa status must be a 20-byte FE46 packet starting with 0x20')
   const state = data.getUint8(1)
-  return { state, stateLabel: LORA_STATES[state] ?? `0x${state.toString(16)}`, txPowerDbm: data.getInt8(2), lastEvent: data.getUint8(3), txDoneStatus: data.getUint8(4), lastRc: data.getInt8(5), commandResult: data.getUint8(6), initStage: data.getUint8(7), uplinkCount: data.getUint16(8, true), eventCount: data.getUint16(10, true), downlinkCount: data.getUint16(12, true), panicCount: data.getUint16(14, true), busyTimeouts: data.getUint16(16, true), spiErrors: data.getUint16(18, true), receivedAt: Date.now() }
+  return { state, stateLabel: enumLabel(LORA_STATES, state), txPowerDbm: data.getInt8(2), lastEvent: data.getUint8(3), txDoneStatus: data.getUint8(4), lastRc: data.getInt8(5), commandResult: data.getUint8(6), initStage: data.getUint8(7), uplinkCount: data.getUint16(8, true), eventCount: data.getUint16(10, true), downlinkCount: data.getUint16(12, true), panicCount: data.getUint16(14, true), busyTimeouts: data.getUint16(16, true), spiErrors: data.getUint16(18, true), receivedAt: Date.now() }
 }
 
 export const UNSUPPORTED_CHARACTERISTICS = [CHARACTERISTICS.NFC_EVENT, CHARACTERISTICS.DEBUG_DATA, CHARACTERISTICS.RECOVERY_DATA] as const
@@ -93,7 +101,10 @@ export function buildTimeSyncPacket(date = new Date()) { return syncTimePacket(d
 
 export type WearState = 'WORN' | 'NOT WORN' | 'UNKNOWN'
 
-/** Power and flag enums. Firmware v1 only ever reports power state 1 (Normal) or 2 (Low power). */
+/**
+ * App-side power settings used by lib/wearableRepository.ts. They are NOT on the wire (spec §17.2 W2):
+ * the BLE power state is only 1 = Normal or 2 = Low power, see POWER_STATES.
+ */
 export enum PowerProfile {
   HIGH = 0x00,
   NORMAL = 0x01,
@@ -241,9 +252,8 @@ export interface DeviceStatus {
 export function decodeStatus(data: DataView): DeviceStatus {
   if (data.byteLength !== DEVICE_STATUS_LENGTH) throw new Error(`Device Status must be ${DEVICE_STATUS_LENGTH} bytes`)
   const flags = data.getUint8(7)
-  const measurement = ['Idle', 'Measuring', 'ECG active', 'Low power', 'Emergency', 'Error'][data.getUint8(0)] || 'UNKNOWN'
-  const errors: Record<number, string> = { 0: 'None', 1: 'Invalid command', 0x10: 'Temperature sensor not present', 0x11: 'Temperature timeout', 0x12: 'Temperature bus error' }
-  return { measurement, measurementRaw: data.getUint8(0), sensorReady: data.getUint8(1) !== 0, error: errors[data.getUint8(2)] || 'UNKNOWN', errorCode: data.getUint8(2), power: data.getUint8(3), supercap: data.getUint16(4, true), resetCounter: data.getUint8(6), flags, protocolVersion: flags & 0x0f, emergency: !!(flags & 0x10), ecgActive: !!(flags & 0x20), wearDetected: !!(flags & 0x40) }
+  const measurement = enumLabel(MEASUREMENT_STATES, data.getUint8(0))
+  return { measurement, measurementRaw: data.getUint8(0), sensorReady: data.getUint8(1) !== 0, error: enumLabel(ERROR_CODES, data.getUint8(2)), errorCode: data.getUint8(2), power: data.getUint8(3), supercap: data.getUint16(4, true), resetCounter: data.getUint8(6), flags, protocolVersion: flags & 0x0f, emergency: !!(flags & 0x10), ecgActive: !!(flags & 0x20), wearDetected: !!(flags & 0x40) }
 }
 
 export function commandPacket(command: number) { const bytes = new Uint8Array(8); bytes[0] = command; return bytes }

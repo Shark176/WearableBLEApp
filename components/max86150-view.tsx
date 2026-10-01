@@ -5,7 +5,7 @@ import ECGMonitor from '@/components/ecg-monitor'
 import type { DiscoveredService } from '@/lib/ble/bleManager'
 import type { EcgStore } from '@/lib/ecg/ecgStore'
 import { ECG_SAMPLE_RATE, ECG_SAMPLES_PER_PACKET } from '@/lib/ecg/signal'
-import { CHARACTERISTICS, type DeviceStatus, type Sensor } from '@/lib/protocol/wearableProtocol'
+import { CHARACTERISTICS, enumLabel, POWER_STATES, type DeviceStatus, type Sensor } from '@/lib/protocol/wearableProtocol'
 
 type Vital = { index: number; hr: number; spo2: number }
 type ConfigState = 'on' | 'off' | 'paused' | 'unknown' | 'info'
@@ -37,7 +37,7 @@ function buildConfig({ mode, ecgActive, sensor, status, simulationRunning, conne
   if (mode === 'demo') {
     return [
       { label: 'ECG channel', state: onOff(ecgActive), value: STATE_LABEL[onOff(ecgActive)], detail: `Simulated · ${ECG_SAMPLE_RATE} Hz, ${ECG_SAMPLES_PER_PACKET} samples/packet` },
-      { label: 'PPG channel (HR / SpO₂)', state: onOff(simulationRunning), value: STATE_LABEL[onOff(simulationRunning)], detail: 'Simulated measurement loop' },
+      { label: 'PPG channel (HR / SpO₂)', state: ecgActive ? 'paused' : onOff(simulationRunning), value: STATE_LABEL[ecgActive ? 'paused' : onOff(simulationRunning)], detail: ecgActive ? 'Simulated · HR and SpO₂ pause while ECG records' : 'Simulated measurement loop' },
       { label: 'Firmware sensor block', state: 'on', value: 'Ready', detail: 'Simulated' },
       { label: 'Wear detection', state: onOff(sensor ? sensor.wear === 'WORN' : undefined), value: sensor?.wear ?? 'Unknown', detail: 'Simulated' },
       { label: 'Register settings', state: 'unknown', value: 'Not reported', detail: 'LED current, sample rate, ADC range and FIFO are not part of protocol v1' },
@@ -55,7 +55,7 @@ function buildConfig({ mode, ecgActive, sensor, status, simulationRunning, conne
     : status ? `FE43 measurement state: ${status.measurement}` : 'No FE43 status received yet'
   const ecgCharacteristic = connected ? services.some((service) => service.characteristics.some((item) => item.uuid.toLowerCase() === CHARACTERISTICS.ECG_DATA && item.notifiable)) : undefined
   const wear = status ? status.wearDetected : sensor ? sensor.wear === 'WORN' : undefined
-  const power = status ? (status.power === 0x02 ? 'Low power' : status.power === 0x01 ? 'Normal' : `0x${status.power.toString(16).padStart(2, '0')}`) : 'Unknown'
+  const power = status ? enumLabel(POWER_STATES, status.power) : 'Unknown'
 
   return [
     { label: 'ECG channel', state: ecg, value: STATE_LABEL[ecg], detail: ecgReported == null ? 'No FE42/FE43 notification received yet' : `Flag 0x20 in FE42/FE43 · ${ECG_SAMPLE_RATE} Hz, ${ECG_SAMPLES_PER_PACKET} samples/packet` },
