@@ -1,106 +1,381 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Download, Minus, Pause, Play, Plus, RotateCcw, Square } from 'lucide-react'
 import type { ECGPacket } from '@/lib/protocol/wearableProtocol'
+import type { EcgEvent, EcgStore } from '@/lib/ecg/ecgStore'
+import { displayFilter, ECG_SAMPLE_RATE, ECG_SAMPLES_PER_PACKET, estimateHeartRate, hostNow } from '@/lib/ecg/signal'
 
 type Props = {
-  packets: ECGPacket[]
+  store: EcgStore
   mode: 'demo' | 'real'
   active: boolean
-  error?: string
   onStart: () => void
   onStop: () => void
 }
 
-type Sample = { value: number; sequence: number; index: number }
-const SAMPLE_RATE = 200
-const CAPACITY = 6000
+/** Columnar session recording; `firstIndex` is the session sample index of element 0. */
+type Recording = { values: number[]; sequences: number[]; rxMs: number[]; firstIndex: number }
+type Session = {
+  received: number
+  lost: number
+  lastSequence: number | null
+  /** Host time of the first packet of the current run, null between runs. */
+  runStartedAt: number | null
+  lastRxMs: number
+  /** Recording time of finished runs. */
+  elapsedMs: number
+  arrivals: { time: number; samples: number }[]
+}
+type Stats = { rate: number; received: number; lost: number; sequence: number | null; duration: number; bpm: number | null }
 
-export default function ECGMonitor({ packets, mode, active, error, onStart, onStop }: Props) {
+/** Horizontal scale steps, oscilloscope style: seconds per major grid division. */
+const TIME_PER_DIV = [0.1, 0.2, 0.5, 1, 2]
+const DIVISIONS = 10
+const DEFAULT_DIV_INDEX = 2
+const MAX_DISPLAY_SAMPLES = (TIME_PER_DIV[TIME_PER_DIV.length - 1] * DIVISIONS + 1) * ECG_SAMPLE_RATE
+const RECORD_MINUTES = 30
+const RECORD_CAPACITY = RECORD_MINUTES * 60 * ECG_SAMPLE_RATE
+/** Trim in one-minute chunks so a full recording is not spliced on every packet. */
+const RECORD_SLACK = 60 * ECG_SAMPLE_RATE
+const RATE_WINDOW_MS = 2000
+const EMPTY_STATS: Stats = { rate: 0, received: 0, lost: 0, sequence: null, duration: 0, bpm: null }
+
+const newRecording = (): Recording => ({ values: [], sequences: [], rxMs: [], firstIndex: 0 })
+const newSession = (): Session => ({ received: 0, lost: 0, lastSequence: null, runStartedAt: null, lastRxMs: 0, elapsedMs: 0, arrivals: [] })
+const pushGap = (recording: Recording) => { recording.values.push(Number.NaN); recording.sequences.push(-1); recording.rxMs.push(Number.NaN) }
+const closeRun = (session: Session) => {
+  if (session.runStartedAt == null) return
+  session.elapsedMs += Math.max(0, session.lastRxMs - session.runStartedAt)
+  session.runStartedAt = null
+}
+const formatDiv = (seconds: number) => (seconds < 1 ? `${Math.round(seconds * 1000)} ms` : `${seconds} s`)
+
+export default function ECGMonitor({ store, mode, active, onStart, onStop }: Props) {
+  const wrapRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [paused, setPaused] = useState(false)
-  const [seconds, setSeconds] = useState<5 | 10>(5)
+
+  const [divIndex, setDivIndex] = useState(DEFAULT_DIV_INDEX)
   const [filtered, setFiltered] = useState(true)
   const [lockedScale, setLockedScale] = useState(false)
-  const [sessionStarted, setSessionStarted] = useState<number | null>(null)
-  const [samples, setSamples] = useState<Sample[]>([])
-  const previousSequence = useRef<number | null>(null)
-  const lostPackets = useRef(0)
-  const totalPackets = useRef(0)
-  const gaps = useRef(0)
-  const lastRate = useRef({ time: 0, count: 0 })
-  const [stats, setStats] = useState({ lost: 0, rate: 0, bpm: '--', sequence: '--' as number | string })
+  const [paused, setPaused] = useState(false)
+  const [stats, setStats] = useState<Stats>(EMPTY_STATS)
+  const [hasSamples, setHasSamples] = useState(false)
 
-  useEffect(() => {
-    if (!packets.length) return
-    const packet = packets.at(-1)!
-    if (sessionStarted == null) setSessionStarted(Date.now())
-    totalPackets.current += 1
-    if (previousSequence.current != null) {
-      const gap = (packet.sequence - previousSequence.current + 256) % 256
-      if (gap > 1) { lostPackets.current += gap - 1; gaps.current += gap - 1 }
+  const timePerDiv = TIME_PER_DIV[divIndex]
+  const seconds = timePerDiv * DIVISIONS
+
+  // Hot path state lives in refs: packets arrive ~22×/s and the canvas redraws every frame.
+  const recording = useRef<Recording>(newRecording())
+  const session = useRef<Session>(newSession())
+  const frozen = useRef<number[] | null>(null)
+  const scale = useRef<{ low: number; high: number } | null>(null)
+  const hasSamplesRef = useRef(false)
+  const settings = useRef({ seconds, filtered, lockedScale, active })
+  useEffect(() => { settings.current = { seconds, filtered, lockedScale, active } }, [seconds, filtered, lockedScale, active])
+
+  const resetSession = useCallback(() => {
+    recording.current = newRecording()
+    session.current = newSession()
+    frozen.current = null
+    scale.current = null
+    hasSamplesRef.current = false
+    setStats(EMPTY_STATS)
+    setHasSamples(false)
+    setPaused(false)
+  }, [])
+
+  /** A new recording run: sequence numbers may restart, so do not count the jump as loss. */
+  const beginRun = useCallback(() => {
+    closeRun(session.current)
+    session.current.lastSequence = null
+    if (recording.current.values.length) pushGap(recording.current)
+  }, [])
+
+  const ingest = useCallback((packet: ECGPacket) => {
+    const current = session.current
+    const record = recording.current
+    const rx = packet.hostRxMs ?? hostNow()
+    if (current.lastSequence != null) {
+      const gap = (packet.sequence - current.lastSequence + 256) % 256
+      if (gap === 0) return // duplicate notification
+      if (gap > 1) {
+        current.lost += gap - 1
+        for (let i = 0; i < (gap - 1) * ECG_SAMPLES_PER_PACKET; i++) pushGap(record)
+      }
     }
-    previousSequence.current = packet.sequence
-    setSamples((current) => {
-      const start = current.length ? current.at(-1)!.index + 1 : 0
-      const missing = gaps.current
-      gaps.current = 0
-      const next = [...current, ...Array.from({ length: missing * 9 }, (_, index) => ({ value: Number.NaN, sequence: -1, index: start + index })), ...packet.samples.map((value, index) => ({ value, sequence: packet.sequence, index: start + missing * 9 + index }))]
-      return next.slice(-CAPACITY)
-    })
-    const now = Date.now()
-    if (now - lastRate.current.time >= 500) {
-      const elapsed = lastRate.current.time ? (now - lastRate.current.time) / 1000 : 2
-      const rate = Math.round(((totalPackets.current - lastRate.current.count) * 9) / elapsed)
-      lastRate.current = { time: now, count: totalPackets.current }
-      setStats((current) => ({ ...current, rate, lost: lostPackets.current, sequence: packet.sequence }))
-    } else setStats((current) => ({ ...current, lost: lostPackets.current, sequence: packet.sequence }))
-  }, [packets, sessionStarted])
+    current.lastSequence = packet.sequence
+    current.received += 1
+    current.runStartedAt ??= rx
+    current.lastRxMs = rx
+    current.arrivals.push({ time: rx, samples: packet.samples.length })
+    for (const value of packet.samples) { record.values.push(value); record.sequences.push(packet.sequence); record.rxMs.push(rx) }
 
-  const visible = useMemo(() => samples.slice(-seconds * SAMPLE_RATE), [samples, seconds])
-  const displayValues = useMemo(() => {
-    if (!filtered) return visible.map((sample) => sample.value)
-    let baseline = 0
-    return visible.map((sample, index, values) => {
-      if (!Number.isFinite(sample.value)) return Number.NaN
-      const previous = Number.isFinite(values[index - 1]?.value) ? values[index - 1].value : sample.value
-      baseline += (sample.value - baseline) * 0.015
-      return sample.value - baseline + (sample.value - previous) * 0.08
-    })
-  }, [visible, filtered])
+    if (record.values.length > RECORD_CAPACITY + RECORD_SLACK) {
+      const drop = record.values.length - RECORD_CAPACITY
+      record.values.splice(0, drop)
+      record.sequences.splice(0, drop)
+      record.rxMs.splice(0, drop)
+      record.firstIndex += drop
+    }
+    if (!hasSamplesRef.current) { hasSamplesRef.current = true; setHasSamples(true) }
+  }, [])
+
+  // Replay recent history on mount, then follow the live stream without re-rendering per packet.
+  useEffect(() => {
+    const handle = (event: EcgEvent) => {
+      if (event.type === 'packet') ingest(event.packet)
+      else if (event.type === 'start') beginRun()
+      else resetSession()
+    }
+    resetSession()
+    store.history().forEach(handle)
+    return store.subscribe(handle)
+  }, [store, ingest, beginRun, resetSession])
+
+  // Stats refresh at 4 Hz instead of on every packet.
+  useEffect(() => {
+    const update = () => {
+      const current = session.current
+      const now = hostNow()
+      current.arrivals = current.arrivals.filter((arrival) => now - arrival.time <= RATE_WINDOW_MS)
+      const recent = current.arrivals.reduce((sum, arrival) => sum + arrival.samples, 0)
+      const values = recording.current.values.slice(-9 * ECG_SAMPLE_RATE)
+      const bpm = values.length > 3 * ECG_SAMPLE_RATE ? estimateHeartRate(displayFilter(values, Math.min(ECG_SAMPLE_RATE, values.length))) : null
+      // The session clock only runs while recording; when stopped it rests on the last packet.
+      const running = current.runStartedAt == null ? 0 : (active ? now : current.lastRxMs) - current.runStartedAt
+      setStats((previous) => ({
+        rate: Math.round(recent / (RATE_WINDOW_MS / 1000)),
+        received: current.received,
+        lost: current.lost,
+        sequence: current.lastSequence,
+        duration: Math.floor((current.elapsedMs + Math.max(0, running)) / 1000),
+        bpm: bpm ?? (active ? previous.bpm : null),
+      }))
+    }
+    update()
+    const id = window.setInterval(update, 250)
+    return () => window.clearInterval(id)
+  }, [active])
 
   useEffect(() => {
+    frozen.current = paused ? recording.current.values.slice(-MAX_DISPLAY_SAMPLES) : null
+  }, [paused])
+
+  // Single render loop; reads the latest samples and settings from refs.
+  useEffect(() => {
+    const wrap = wrapRef.current
     const canvas = canvasRef.current
-    if (!canvas || paused) return
-    const context = canvas.getContext('2d')
-    if (!context) return
+    const context = canvas?.getContext('2d')
+    if (!wrap || !canvas || !context) return
+    const style = getComputedStyle(canvas)
+    const color = (name: string, fallback: string) => style.getPropertyValue(name).trim() || fallback
     let frame = 0
-    const draw = () => {
-      const rect = canvas.getBoundingClientRect()
+    let previousTime = 0
+
+    const draw = (time: number) => {
+      frame = requestAnimationFrame(draw)
+      const elapsed = Math.min(100, time - previousTime)
+      previousTime = time
+
+      // Keep the backing store in sync with the CSS size and device pixel ratio.
       const ratio = window.devicePixelRatio || 1
-      canvas.width = rect.width * ratio; canvas.height = rect.height * ratio
+      const width = wrap.clientWidth
+      const height = wrap.clientHeight
+      if (!width || !height) return
+      const backingWidth = Math.round(width * ratio)
+      const backingHeight = Math.round(height * ratio)
+      if (canvas.width !== backingWidth || canvas.height !== backingHeight) { canvas.width = backingWidth; canvas.height = backingHeight }
+
+      const { seconds: windowSeconds, filtered: useFilter, lockedScale: locked, active: recordingNow } = settings.current
+      const capacity = Math.round(windowSeconds * ECG_SAMPLE_RATE)
+
       context.setTransform(ratio, 0, 0, ratio, 0, 0)
-      const width = rect.width; const height = rect.height
-      context.fillStyle = getComputedStyle(canvas).getPropertyValue('--ecg-bg') || '#fbfdfb'; context.fillRect(0, 0, width, height)
-      context.strokeStyle = getComputedStyle(canvas).getPropertyValue('--ecg-grid') || '#d8e7df'; context.lineWidth = 1
-      for (let x = 0; x <= width; x += width / (seconds * 5)) { context.beginPath(); context.moveTo(x, 0); context.lineTo(x, height); context.stroke() }
-      for (let y = 0; y <= height; y += 20) { context.beginPath(); context.moveTo(0, y); context.lineTo(width, y); context.stroke() }
-      const finite = displayValues.filter(Number.isFinite) as number[]
-      if (!finite.length) { context.fillStyle = '#71827c'; context.font = '12px Arial'; context.fillText('Waiting for ECG samples…', 18, 24); frame = requestAnimationFrame(draw); return }
-      const min = lockedScale ? -2000 : Math.min(...finite); const max = lockedScale ? 2000 : Math.max(...finite); const padding = lockedScale ? 0 : Math.max(20, (max - min) * 0.15)
-      const low = min - padding; const high = max + padding
-      context.strokeStyle = '#3f829f'; context.lineWidth = 2; context.beginPath()
-      displayValues.forEach((value, index) => { if (!Number.isFinite(value)) { context.stroke(); context.beginPath(); return }; const x = (index / Math.max(1, seconds * SAMPLE_RATE - 1)) * width; const y = height - ((value - low) / (high - low)) * height; if (index === 0 || !Number.isFinite(displayValues[index - 1])) context.moveTo(x, y); else context.lineTo(x, y) })
-      context.stroke(); frame = requestAnimationFrame(draw)
+      context.fillStyle = color('--ecg-bg', '#fbfdfb')
+      context.fillRect(0, 0, width, height)
+      drawGrid(context, width, height, color('--ecg-grid-minor', '#edf4f0'), color('--ecg-grid', '#d8e7df'))
+
+      const source = frozen.current ?? recording.current.values
+      const warmup = useFilter ? Math.min(ECG_SAMPLE_RATE, Math.max(0, source.length - capacity)) : 0
+      const raw = source.slice(-(capacity + warmup))
+      const values = useFilter ? displayFilter(raw, warmup) : raw
+
+      let min = Infinity
+      let max = -Infinity
+      for (const value of values) if (Number.isFinite(value)) { if (value < min) min = value; if (value > max) max = value }
+      if (min === Infinity) {
+        context.fillStyle = color('--ecg-muted', '#71827c')
+        context.font = '13px Arial, sans-serif'
+        context.textAlign = 'center'
+        context.fillText(recordingNow ? 'Waiting for ECG samples…' : 'Press “Start ECG” to begin recording', width / 2, height / 2)
+        context.textAlign = 'start'
+        return
+      }
+
+      // Auto-scale grows at once and eases back (≈0.3 s time constant) so the trace does not jump.
+      const padding = Math.max(40, (max - min) * 0.15)
+      const target = { low: min - padding, high: max + padding }
+      if (!scale.current) scale.current = target
+      else if (!locked) {
+        const ease = 1 - Math.exp(-elapsed / 300)
+        const current = scale.current
+        current.low = target.low < current.low ? target.low : current.low + (target.low - current.low) * ease
+        current.high = target.high > current.high ? target.high : current.high + (target.high - current.high) * ease
+      }
+      const { low, high } = scale.current
+
+      // Newest sample sits on the right edge; the window fills from the right.
+      const offset = capacity - values.length
+      const step = width / Math.max(1, capacity - 1)
+      context.strokeStyle = color('--ecg-trace', '#3f829f')
+      context.lineWidth = 1.6
+      context.lineJoin = 'round'
+      context.beginPath()
+      let drawing = false
+      for (let i = 0; i < values.length; i++) {
+        const value = values[i]
+        if (!Number.isFinite(value)) { drawing = false; continue }
+        const x = (offset + i) * step
+        const y = height - ((value - low) / (high - low)) * height
+        if (drawing) context.lineTo(x, y)
+        else { context.moveTo(x, y); drawing = true }
+      }
+      context.stroke()
+
+      context.fillStyle = color('--ecg-muted', '#71827c')
+      context.font = '10px Arial, sans-serif'
+      context.fillText(`${Math.round(high)}`, 6, 12)
+      context.fillText(`${Math.round(low)}`, 6, height - 6)
     }
+
     frame = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(frame)
-  }, [displayValues, seconds, paused, lockedScale])
+  }, [])
 
-  useEffect(() => { if (!samples.length) return; const peaks: number[] = []; for (let i = 1; i < displayValues.length - 1; i++) if (Number.isFinite(displayValues[i]) && displayValues[i] > displayValues[i - 1] && displayValues[i] >= displayValues[i + 1] && displayValues[i] > 0) peaks.push(i); const intervals = peaks.slice(-9).slice(1).map((peak, index) => peak - peaks.slice(-9)[index]); const bpm = intervals.length ? Math.round(60 * SAMPLE_RATE / (intervals.reduce((sum, value) => sum + value, 0) / intervals.length)) : null; if (bpm && bpm > 30 && bpm < 220) setStats((current) => ({ ...current, bpm: String(bpm) })) }, [displayValues, samples.length])
+  const download = () => {
+    const { values, sequences, rxMs, firstIndex } = recording.current
+    const rows = ['sample_index,time_s,sequence,value_raw,host_rx_ms']
+    for (let i = 0; i < values.length; i++) {
+      const index = firstIndex + i
+      rows.push(`${index},${(index / ECG_SAMPLE_RATE).toFixed(3)},${sequences[i] < 0 ? '' : sequences[i]},${Number.isFinite(values[i]) ? values[i] : ''},${Number.isFinite(rxMs[i]) ? rxMs[i].toFixed(3) : ''}`)
+    }
+    const url = URL.createObjectURL(new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `ecg-session-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
 
-  const download = () => { const rows = ['sample_index,time_s,sequence,value_raw']; samples.forEach((sample) => rows.push(`${sample.index},${(sample.index / SAMPLE_RATE).toFixed(3)},${sample.sequence < 0 ? '' : sample.sequence},${Number.isFinite(sample.value) ? sample.value : ''}`)); const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'ecg-session.csv'; link.click(); URL.revokeObjectURL(url) }
-  const reset = () => { setSamples([]); setSessionStarted(Date.now()); previousSequence.current = null; lostPackets.current = 0; totalPackets.current = 0; setStats({ lost: 0, rate: 0, bpm: '--', sequence: '--' }) }
-  const duration = sessionStarted ? Math.floor((Date.now() - sessionStarted) / 1000) : 0
-  return <section className="view-stack ecg-monitor"><section className="info-card ecg-header"><div><p className="eyebrow">ECG · FE45</p><h2>Real-time electrocardiogram</h2><p className="subheading">ADC counts · 200 Hz · 9 samples per packet</p></div><div className="button-row"><button className="primary-btn" onClick={active ? onStop : onStart}>{active ? 'Stop ECG' : 'Start ECG'}</button><button className="secondary-btn" onClick={reset}>New session</button></div></section>{error && <div className="error-banner">{error}</div>}<section className="info-card ecg-chart-card"><div className="ecg-toolbar"><label>Window <select value={seconds} onChange={(event) => setSeconds(Number(event.target.value) as 5 | 10)}><option value="5">5 s</option><option value="10">10 s</option></select></label><label><input type="checkbox" checked={filtered} onChange={(event) => setFiltered(event.target.checked)} /> Display filter</label><label><input type="checkbox" checked={lockedScale} onChange={(event) => setLockedScale(event.target.checked)} /> Lock scale</label><button className="secondary-btn" onClick={() => setPaused(!paused)}>{paused ? 'Resume display' : 'Pause display'}</button><button className="secondary-btn" onClick={download} disabled={!samples.length}>Download CSV</button></div><div className="ecg-canvas-wrap"><canvas ref={canvasRef} aria-label="Real-time ECG waveform" /></div><p className="card-footnote">Grid: large square = 0.2 s · Y axis: ADC counts · {paused ? 'Display paused; reception continues.' : 'Scrolling window'}</p></section><section className="ecg-stats">{[['Sample rate', `${stats.rate || 0} /s`], ['Total packets', String(totalPackets.current)], ['Lost packets', String(stats.lost)], ['Loss rate', `${totalPackets.current ? ((stats.lost / (totalPackets.current + stats.lost)) * 100).toFixed(1) : '0.0'}%`], ['Sequence', String(stats.sequence)], ['Session', `${duration}s`], ['Estimated HR', `${stats.bpm} bpm`]].map(([label, value]) => <div className="info-card" key={label}><span>{label}</span><strong>{value}</strong></div>)}</section><p className="card-footnote">Estimated heart rate is for reference only and must not be used for diagnosis. Source: {mode === 'real' ? 'wearable BLE' : 'demo session'}.</p></section>
+  const lossRate = stats.received + stats.lost ? (stats.lost / (stats.received + stats.lost)) * 100 : 0
+  const tiles: [string, string, string?][] = [
+    ['Estimated HR', stats.bpm == null ? '--' : String(stats.bpm), 'bpm'],
+    ['Sample rate', String(stats.rate), '/s'],
+    ['Packets', String(stats.received)],
+    ['Lost packets', String(stats.lost)],
+    ['Loss rate', lossRate.toFixed(1), '%'],
+    ['Sequence', stats.sequence == null ? '--' : String(stats.sequence)],
+    ['Recording time', formatDuration(stats.duration)],
+  ]
+
+  return (
+    <section className="view-stack ecg-monitor">
+      <section className="info-card ecg-header">
+        <div>
+          <p className="eyebrow">ECG · FE45</p>
+          <h2>Real-time electrocardiogram</h2>
+          <p className="subheading">ADC counts · {ECG_SAMPLE_RATE} Hz · {ECG_SAMPLES_PER_PACKET} samples per packet</p>
+        </div>
+        <div className="ecg-header-side">
+          <span className={`ecg-live ${active ? 'on' : ''}`}><span />{active ? 'Recording' : 'Stopped'}</span>
+          <div className="button-row">
+            <button className="primary-btn" onClick={active ? onStop : onStart}>
+              {active ? <Square size={14} /> : <Play size={14} />}
+              {active ? 'Stop ECG' : 'Start ECG'}
+            </button>
+            <button className="secondary-btn" onClick={resetSession}>
+              <RotateCcw size={14} /> New session
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="info-card ecg-chart-card">
+        <div className="ecg-toolbar">
+          <div className="ecg-field" role="group" aria-label="Time per division">
+            Time/div
+            <div className="ecg-stepper">
+              <button aria-label="Decrease time per division (zoom in)" disabled={divIndex === 0} onClick={() => setDivIndex(divIndex - 1)}>
+                <Minus size={13} />
+              </button>
+              <output aria-live="polite">{formatDiv(timePerDiv)}</output>
+              <button aria-label="Increase time per division (zoom out)" disabled={divIndex === TIME_PER_DIV.length - 1} onClick={() => setDivIndex(divIndex + 1)}>
+                <Plus size={13} />
+              </button>
+            </div>
+            <span className="ecg-window">{seconds} s window</span>
+          </div>
+          <label className="ecg-check">
+            <input type="checkbox" checked={filtered} onChange={(event) => setFiltered(event.target.checked)} /> Display filter
+          </label>
+          <label className="ecg-check">
+            <input type="checkbox" checked={lockedScale} onChange={(event) => setLockedScale(event.target.checked)} /> Lock scale
+          </label>
+          <div className="ecg-toolbar-actions">
+            <button className="secondary-btn" onClick={() => setPaused(!paused)}>
+              {paused ? <Play size={14} /> : <Pause size={14} />}
+              {paused ? 'Resume' : 'Pause'}
+            </button>
+            <button className="secondary-btn" onClick={download} disabled={!hasSamples}>
+              <Download size={14} /> CSV
+            </button>
+          </div>
+        </div>
+        <div className="ecg-canvas-wrap" ref={wrapRef}>
+          <canvas ref={canvasRef} aria-label="Real-time ECG waveform" role="img" />
+        </div>
+        <p className="card-footnote">
+          Large square = {formatDiv(timePerDiv)} · small square = {formatDiv(timePerDiv / 5)} · Y axis: ADC counts{filtered ? ' (baseline removed)' : ''} ·{' '}
+          {paused ? 'Display paused, reception continues.' : 'Scrolling window'} · CSV keeps the last {RECORD_MINUTES} min of the session.
+        </p>
+      </section>
+
+      <section className="ecg-stats">
+        {tiles.map(([label, value, unit]) => (
+          <div className="ecg-stat" key={label}>
+            <span>{label}</span>
+            <strong>
+              {value}
+              {unit && <small>{unit}</small>}
+            </strong>
+          </div>
+        ))}
+      </section>
+
+      <p className="card-footnote">
+        Estimated heart rate is for reference only and must not be used for diagnosis. Source: {mode === 'real' ? 'wearable BLE (FE45)' : 'synthetic demo signal'}.
+      </p>
+    </section>
+  )
+}
+
+/** Square grid: a major line every time division, five minor cells per division. */
+function drawGrid(context: CanvasRenderingContext2D, width: number, height: number, minor: string, major: string) {
+  const cell = width / (DIVISIONS * 5)
+  const lines = (color: string, every: number) => {
+    context.strokeStyle = color
+    context.lineWidth = 1
+    context.beginPath()
+    for (let x = 0; x <= width + 0.5; x += cell * every) { context.moveTo(Math.round(x) + 0.5, 0); context.lineTo(Math.round(x) + 0.5, height) }
+    for (let y = height; y >= -0.5; y -= cell * every) { context.moveTo(0, Math.round(y) + 0.5); context.lineTo(width, Math.round(y) + 0.5) }
+    context.stroke()
+  }
+  if (cell >= 4) lines(minor, 1)
+  lines(major, 5)
+}
+
+function formatDuration(total: number) {
+  const minutes = Math.floor(total / 60)
+  const secondsPart = String(total % 60).padStart(2, '0')
+  return `${minutes}:${secondsPart}`
 }
